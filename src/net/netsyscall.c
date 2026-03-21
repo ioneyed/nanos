@@ -1211,6 +1211,10 @@ closure_func_basic(fdesc_close, sysreturn, socket_close,
         }
         break;
     case SOCK_DGRAM:
+        /* Clear recv callback before removal so any in-flight udp_input
+         * that already ref'd the PCB will see a NULL callback and skip
+         * invoking udp_input_lower on a socket being freed. */
+        udp_recv(s->info.udp.lw, NULL, NULL);
         udp_remove(s->info.udp.lw);
         break;
     }
@@ -1318,6 +1322,11 @@ sysreturn shutdown(int sockfd, int how)
 static void udp_input_lower(void *z, struct udp_pcb *pcb, struct pbuf *p,
                             struct ip_globals *ip_data, u16 port)
 {
+    if (!z) {
+        if (p)
+            pbuf_free(p);
+        return;
+    }
     netsock s = z;
 #ifdef NETSYSCALL_DEBUG
     u8 *n = (u8 *)(&ip_data->current_iphdr_src);
