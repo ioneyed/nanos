@@ -20,6 +20,9 @@
 #define netvsc_debug(x, ...)
 #endif
 
+#define NETVSC_RX_CANARY_SIZE   32
+#define NETVSC_RX_CANARY_PATTERN 0xBA
+
 #define DEVICE_NAME "en"
 
 /*
@@ -52,16 +55,28 @@ static void
 receive_buffer_release(struct pbuf *p)
 {
     xpbuf x  = (void *)p;
-    deallocate((heap)x->hn->rxbuffers, x, x->hn->rxbuflen + sizeof(struct xpbuf));
+    /* Check canary on buffer release */
+    u8 *canary = (u8 *)(x + 1) + x->hn->rxbuflen;
+    for (int i = 0; i < NETVSC_RX_CANARY_SIZE; i++) {
+        if (canary[i] != NETVSC_RX_CANARY_PATTERN) {
+            rprintf("netvsc: CANARY CORRUPTED on release at buf %p, rxbuflen %d, "
+                    "canary offset %d: expected 0x%x got 0x%x\n",
+                    x + 1, x->hn->rxbuflen, i,
+                    NETVSC_RX_CANARY_PATTERN, canary[i]);
+            halt("netvsc: receive buffer canary corruption detected\n");
+        }
+    }
+    deallocate((heap)x->hn->rxbuffers, x, x->hn->rxbuflen + sizeof(struct xpbuf) + NETVSC_RX_CANARY_SIZE);
 }
 
 static xpbuf
 receive_buffer_alloc(hn_softc_t *hn)
 {
-    xpbuf x = allocate((heap)hn->rxbuffers, sizeof(struct xpbuf) + hn->rxbuflen);
+    xpbuf x = allocate((heap)hn->rxbuffers, sizeof(struct xpbuf) + hn->rxbuflen + NETVSC_RX_CANARY_SIZE);
     assert(x != INVALID_ADDRESS);
     x->hn = hn;
     x->p.custom_free_function = receive_buffer_release;
+    runtime_memset((u8 *)(x + 1) + hn->rxbuflen, NETVSC_RX_CANARY_PATTERN, NETVSC_RX_CANARY_SIZE);
     /* no lwip lock necessary */
     pbuf_alloced_custom(PBUF_RAW,
                         hn->rxbuflen,
@@ -257,7 +272,7 @@ netvsc_attach(kernel_heaps kh, hv_device* device)
 
     hn->rxbuflen = NETVSC_RX_MAXSEGSIZE;
     hn->rxbuffers = allocate_objcache(hn->general, hn->contiguous,
-                                      hn->rxbuflen + sizeof(struct xpbuf), PAGESIZE_2M, true);
+                                      hn->rxbuflen + sizeof(struct xpbuf) + NETVSC_RX_CANARY_SIZE, PAGESIZE_2M, true);
 
     netif_dev_init(&hn->ndev);
 
@@ -400,6 +415,18 @@ netvsc_recv(struct hv_device *device_ctx, netvsc_packet *packet)
 
         netvsc_m_append(hn, x, packet->page_buffers[i].gpa_len,
             vaddr + packet->page_buffers[i].gpa_ofs);
+    }
+
+    /* Check canary after copy — detect if netvsc_m_append overflowed the buffer */
+    u8 *canary = (u8 *)(x + 1) + hn->rxbuflen;
+    for (int i = 0; i < NETVSC_RX_CANARY_SIZE; i++) {
+        if (canary[i] != NETVSC_RX_CANARY_PATTERN) {
+            rprintf("netvsc: CANARY CORRUPTED after copy at buf %p, rxbuflen %d, "
+                    "pkt_len %d, canary offset %d: expected 0x%x got 0x%x\n",
+                    x + 1, hn->rxbuflen, packet->tot_data_buf_len, i,
+                    NETVSC_RX_CANARY_PATTERN, canary[i]);
+            halt("netvsc: receive buffer canary corruption after copy\n");
+        }
     }
 
     err_enum_t err = n->input((struct pbuf *)x, n);

@@ -843,6 +843,16 @@ hv_nv_on_receive(struct hv_device *device, struct vmbus_chanpkt_hdr *pkt)
 
         net_vsc_pkt->tot_data_buf_len =
             vm_xfer_page_pkt->cp_rxbuf[i].rb_len;
+
+        /* Validate host-provided offset and length against shared buffer */
+        u32 rb_ofs = vm_xfer_page_pkt->cp_rxbuf[i].rb_ofs;
+        u32 rb_len = vm_xfer_page_pkt->cp_rxbuf[i].rb_len;
+        if (rb_ofs + rb_len > net_dev->rx_buf_size) {
+            rprintf("netvsc: RX BOUNDS VIOLATION: rb_ofs %d + rb_len %d = %d > rx_buf_size %d\n",
+                    rb_ofs, rb_len, rb_ofs + rb_len, net_dev->rx_buf_size);
+            halt("netvsc: host provided out-of-bounds receive descriptor\n");
+        }
+
         net_vsc_pkt->page_buf_count = 1;
 
         net_vsc_pkt->page_buffers[0].gpa_len =
