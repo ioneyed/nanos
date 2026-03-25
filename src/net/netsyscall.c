@@ -1355,6 +1355,17 @@ static void udp_input_lower(void *z, struct udp_pcb *pcb, struct pbuf *p,
 	      s->sock.fd, pcb, p, n[0], n[1], n[2], n[3], port);
     assert(pcb == s->info.udp.lw);
     if (p) {
+        /* Validate pbuf before processing. */
+        if (p->tot_len == 0 || p->tot_len > 0xFFFF || p->len > p->tot_len) {
+            rprintf("udp_input_lower: CORRUPT PBUF: p %p, len %d, tot_len %d, ref %d, "
+                    "payload %p, next %p\n",
+                    p, p->len, p->tot_len, p->ref, p->payload, p->next);
+            halt("udp_input_lower: corrupt pbuf detected\n");
+        }
+        if (p->ref == 0 || p->ref > 128) {
+            rprintf("udp_input_lower: PBUF BAD REFCNT: p %p, ref %d\n", p, p->ref);
+            halt("udp_input_lower: pbuf refcount out of range\n");
+        }
 	netsock_lock(s);
 	if ((s->sock.rx_len + p->tot_len > so_rcvbuf) || queue_full(s->incoming)) {
 	    netsock_unlock(s);
@@ -1535,6 +1546,46 @@ static err_t tcp_input_lower(void *z, struct tcp_pcb *pcb, struct pbuf *p, err_t
     if (err != ERR_OK) {
         /* shouldn't happen according to lwIP sources; just report */
         msg_err("%s error from lwIP: %d", func_ss, err);
+    }
+
+    /* Validate incoming pbuf chain before processing. */
+    if (p) {
+        if (p->tot_len == 0 || p->tot_len > 0xFFFF || p->len > p->tot_len) {
+            rprintf("tcp_input_lower: CORRUPT PBUF: p %p, len %d, tot_len %d, ref %d, "
+                    "payload %p, next %p, type %d, flags %d\n",
+                    p, p->len, p->tot_len, p->ref, p->payload, p->next,
+                    p->type_internal, p->flags);
+            halt("tcp_input_lower: corrupt pbuf detected\n");
+        }
+        if (p->ref == 0 || p->ref > 128) {
+            rprintf("tcp_input_lower: PBUF BAD REFCNT: p %p, ref %d, len %d\n",
+                    p, p->ref, p->tot_len);
+            halt("tcp_input_lower: pbuf refcount out of range\n");
+        }
+        /* Walk the chain and verify total length consistency. */
+        u32 chain_len = 0;
+        struct pbuf *q = p;
+        int chain_count = 0;
+        while (q) {
+            if (q->len > q->tot_len || q->tot_len > 0xFFFF) {
+                rprintf("tcp_input_lower: CORRUPT PBUF CHAIN at link %d: "
+                        "q %p, len %d, tot_len %d, ref %d\n",
+                        chain_count, q, q->len, q->tot_len, q->ref);
+                halt("tcp_input_lower: corrupt pbuf in chain\n");
+            }
+            chain_len += q->len;
+            q = q->next;
+            if (++chain_count > 256) {
+                rprintf("tcp_input_lower: PBUF CHAIN LOOP: exceeded 256 links at p %p\n", p);
+                halt("tcp_input_lower: pbuf chain loop detected\n");
+            }
+        }
+        if (chain_len != p->tot_len) {
+            rprintf("tcp_input_lower: PBUF CHAIN LEN MISMATCH: "
+                    "chain_len %d != tot_len %d, p %p, links %d\n",
+                    chain_len, p->tot_len, p, chain_count);
+            halt("tcp_input_lower: pbuf chain length mismatch\n");
+        }
     }
 
     /* A null pbuf indicates connection closed. */

@@ -75,11 +75,22 @@ u32 sys_now(void)
 void *lwip_allocate(u64 size)
 {
     void *p = allocate(lwip_heap, size);
-    return ((p != INVALID_ADDRESS) ? p : 0);
+    if (p == INVALID_ADDRESS || p == 0)
+        return 0;
+    /* Sanity check: returned pointer should be non-zero and page-aligned
+       for large allocations, and within a reasonable kernel address range. */
+    if (size >= PAGESIZE && ((u64)p & (PAGESIZE - 1)) != 0) {
+        rprintf("lwip_allocate: MISALIGNED large alloc: size %ld, ptr %p\n", size, p);
+    }
+    return p;
 }
 
 void lwip_deallocate(void *x)
 {
+    if (!x) {
+        rprintf("lwip_deallocate: NULL pointer free\n");
+        return;
+    }
     /* no size info; mcache won't care */
     deallocate(lwip_heap, x, -1ull);
 }

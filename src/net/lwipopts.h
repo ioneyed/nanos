@@ -46,7 +46,10 @@
 #else
 #define LWIP_PLATFORM_DIAG
 #endif /* LWIP_DEBUG */
-#define LWIP_PLATFORM_ASSERT(x)
+#define LWIP_PLATFORM_ASSERT(x) do { \
+    rprintf("lwip ASSERT FAIL: %s (%s:%d)\n", (x), __FILE__, __LINE__); \
+    halt("lwip assertion failed\n"); \
+} while(0)
 #define LWIP_NO_STDDEF_H 1
 #define LWIP_NO_STDINT_H 1
 #define LWIP_NO_INTTYPES_H 1
