@@ -102,11 +102,27 @@ static u64 alloc_check(volatile mem_debug_hdr hdr, bytes b, bytes padding)
 
 static void dealloc_check(volatile mem_debug_hdr hdr, u64 a, bytes b, bytes nb, bytes padding)
 {
-    assert(hdr->sig == DBG_HDR_SIG);
-    assert(b == hdr->allocsize);
+    if (hdr->sig != DBG_HDR_SIG) {
+        rprintf("mem_debug: HEADER CORRUPTION at %p (user buf %p, dealloc size %ld)\n",
+                hdr, pointer_from_u64(a), b);
+        assert(hdr->sig == DBG_HDR_SIG);
+    }
+    if (b != hdr->allocsize) {
+        rprintf("mem_debug: SIZE MISMATCH at %p: alloc %ld, dealloc %ld, alloc_addr %p\n",
+                pointer_from_u64(a), hdr->allocsize, b, pointer_from_u64(hdr->alloc_addr));
+        assert(b == hdr->allocsize);
+    }
 #ifdef MEMDBG_OVERRUN
-    assert(check_pattern(hdr + 1, padding - sizeof(*hdr), &pat_redzone, sizeof(pat_redzone)));
-    assert(check_pattern(pointer_from_u64(a + b), padding, &pat_redzone, sizeof(pat_redzone)));
+    if (!check_pattern(hdr + 1, padding - sizeof(*hdr), &pat_redzone, sizeof(pat_redzone))) {
+        rprintf("mem_debug: PRE-BUFFER OVERRUN at %p (size %ld, alloc_addr %p)\n",
+                pointer_from_u64(a), hdr->allocsize, pointer_from_u64(hdr->alloc_addr));
+        assert(check_pattern(hdr + 1, padding - sizeof(*hdr), &pat_redzone, sizeof(pat_redzone)));
+    }
+    if (!check_pattern(pointer_from_u64(a + b), padding, &pat_redzone, sizeof(pat_redzone))) {
+        rprintf("mem_debug: POST-BUFFER OVERRUN at %p (size %ld, alloc_addr %p)\n",
+                pointer_from_u64(a), hdr->allocsize, pointer_from_u64(hdr->alloc_addr));
+        assert(check_pattern(pointer_from_u64(a + b), padding, &pat_redzone, sizeof(pat_redzone)));
+    }
 #endif
 #ifdef MEMDBG_FREE
     set_pattern(hdr, nb, &pat_freed, sizeof(pat_freed));
