@@ -104,6 +104,7 @@ typedef struct netsock {
     closure_struct(fdesc_events, events);
     closure_struct(fdesc_ioctl, ioctl);
     closure_struct(fdesc_close, close);
+    u64 lock_flags;                   /* saved IRQ flags from netsock_lock */
 } *netsock;
 
 /* Mask of TCP flags expressing socket configuration settings (as opposed to flags describing the
@@ -115,9 +116,12 @@ typedef struct netsock {
  * the entire netvsc -> lwIP -> tcp_input_lower chain in interrupt context
  * (poll_mode).  Without interrupt disable, an interrupt can preempt a
  * syscall mid-lwIP-call, corrupting shared TCP PCB state.
+ *
+ * Flags are stored in netsock->lock_flags so that unlock can be called
+ * from a different function than lock (e.g. netsock_notify_events).
  */
-#define netsock_lock(s)     u64 _nsl_flags = spin_lock_irq(&(s)->sock.f.lock)
-#define netsock_unlock(s)   spin_unlock_irq(&(s)->sock.f.lock, _nsl_flags)
+#define netsock_lock(s)     do { (s)->lock_flags = spin_lock_irq(&(s)->sock.f.lock); } while(0)
+#define netsock_unlock(s)   spin_unlock_irq(&(s)->sock.f.lock, (s)->lock_flags)
 
 #define DEFAULT_SO_RCVBUF   0x34000 /* same as Linux */
 
