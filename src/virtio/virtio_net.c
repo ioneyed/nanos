@@ -55,6 +55,9 @@
 # define virtio_net_debug(...) do { } while(0)
 #endif // defined(VIRTIO_NET_DEBUG)
 
+#define VNET_RX_CANARY_SIZE   32
+#define VNET_RX_CANARY_PATTERN 0xBA
+
 #define VIRTIO_NET_DRV_FEATURES \
     (VIRTIO_NET_F_GUEST_CSUM | VIRTIO_NET_F_MAC | VIRTIO_NET_F_GUEST_TSO4 |         \
      VIRTIO_NET_F_GUEST_TSO6 | VIRTIO_NET_F_GUEST_ECN | VIRTIO_NET_F_GUEST_UFO |    \
@@ -179,13 +182,14 @@ static void receive_buffer_release(struct pbuf *p)
     virtqueue rxq = x->rx->q;
     if (virtqueue_free_entries(rxq) > 0) {
         int desc_count;
+        runtime_memset((u8 *)(x + 1) + vn->rxbuflen, VNET_RX_CANARY_PATTERN, VNET_RX_CANARY_SIZE);
         vqmsg m = vnet_rxq_push(vn, x, &desc_count);
         if (m != INVALID_ADDRESS) {
             vqmsg_commit_seqno(rxq, m, (vqfinish)&x->input, &x->seqno, true);
             return;
         }
     }
-    deallocate((heap)vn->rxbuffers, x, vn->rxbuflen + sizeof(struct xpbuf));
+    deallocate((heap)vn->rxbuffers, x, vn->rxbuflen + sizeof(struct xpbuf) + VNET_RX_CANARY_SIZE);
 }
 
 static int post_receive(vnet vn, vnet_rx rx);
@@ -198,6 +202,20 @@ closure_func_basic(vqfinish, void, vnet_input,
     xpbuf x = struct_from_field(closure_self(), xpbuf, input);
     vnet vn= x->vn;
     vnet_rx rx = x->rx;
+
+    /* Check canary bytes after DMA buffer — detect DMA overrun or stale write */
+    u8 *canary = (u8 *)(x + 1) + vn->rxbuflen;
+    for (int i = 0; i < VNET_RX_CANARY_SIZE; i++) {
+        if (canary[i] != VNET_RX_CANARY_PATTERN) {
+            rprintf("vnet_rx: CANARY CORRUPTED at buf %p, rxbuflen %d, dma_len %ld, "
+                    "canary offset %d: expected 0x%x got 0x%x, phys %p\n",
+                    x + 1, vn->rxbuflen, len, i,
+                    VNET_RX_CANARY_PATTERN, canary[i],
+                    pointer_from_u64(physical_from_virtual(x + 1)));
+            halt("vnet_rx: DMA buffer canary corruption detected\n");
+        }
+    }
+
     boolean err = false;
     struct virtio_net_hdr *hdr;
     boolean pkt_complete;
@@ -295,12 +313,13 @@ static int post_receive(vnet vn, vnet_rx rx)
     int new_entries = 0;
     int rxbuflen = vn->rxbuflen;
     while (new_entries < free_entries) {
-        xpbuf x = allocate((heap)vn->rxbuffers, sizeof(struct xpbuf) + rxbuflen);
+        xpbuf x = allocate((heap)vn->rxbuffers, sizeof(struct xpbuf) + rxbuflen + VNET_RX_CANARY_SIZE);
         if (x == INVALID_ADDRESS)
             break;
         x->vn = vn;
         x->rx = rx;
         x->p.custom_free_function = receive_buffer_release;
+        runtime_memset((u8 *)(x + 1) + rxbuflen, VNET_RX_CANARY_PATTERN, VNET_RX_CANARY_SIZE);
         int desc_count;
         vqmsg m = vnet_rxq_push(vn, x, &desc_count);
         if (m == INVALID_ADDRESS)
@@ -319,7 +338,7 @@ closure_func_basic(mem_cleaner, u64, vnet_mem_cleaner,
 {
     vnet vn = struct_from_field(closure_self(), vnet, mem_cleaner);
     return cache_drain(vn->rxbuffers, clean_bytes,
-                       NET_RX_BUFFERS_RETAIN * (sizeof(struct xpbuf) + vn->rxbuflen));
+                       NET_RX_BUFFERS_RETAIN * (sizeof(struct xpbuf) + vn->rxbuflen + VNET_RX_CANARY_SIZE));
 }
 
 closure_func_basic(vqfinish, void, vnet_cmd_finish,
@@ -487,7 +506,7 @@ closure_func_basic(netif_dev_setup, boolean, virtio_net_setup,
     }
     virtio_net_debug("%s: rx q entries %d, tx q entries %d\n", func_ss,
                      rxq_entries, txq_entries);
-    bytes rx_allocsize = vn->rxbuflen + sizeof(struct xpbuf);
+    bytes rx_allocsize = vn->rxbuflen + sizeof(struct xpbuf) + VNET_RX_CANARY_SIZE;
     bytes rxbuffers_pagesize = find_page_size(rx_allocsize, rxq_entries);
     bytes tx_handler_size = sizeof(closure_struct_type(tx_complete));
     bytes tx_handler_pagesize = find_page_size(tx_handler_size, txq_entries);

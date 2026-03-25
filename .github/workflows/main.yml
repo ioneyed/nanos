@@ -15,6 +15,6 @@ jobs:
     - name: Install tools
       run: brew install nasm x86_64-elf-binutils aarch64-elf-binutils
     - name: x86 build
-      run: make -j`sysctl -n hw.ncpu` kernel PLATFORM=pc MEMDEBUG=mcache
+      run: make -j`sysctl -n hw.ncpu` kernel PLATFORM=pc MEMDEBUG=all
     - name: ARM build
-      run: make -j`sysctl -n hw.ncpu` kernel PLATFORM=virt MEMDEBUG=mcache
+      run: make -j`sysctl -n hw.ncpu` kernel PLATFORM=virt MEMDEBUG=all
