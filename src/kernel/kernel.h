@@ -764,3 +764,9 @@ void early_debug_sstring(sstring s);
 
 void early_debug_u64(u64 n);
 void early_dump(void *p, unsigned long length);
+
+/* Physical page aliasing detector (mmap.c) */
+void phys_alias_init(void);
+void phys_alias_register_user_page(u64 phys);
+void phys_alias_unregister_user_page(u64 phys);
+boolean phys_alias_check_kernel(u64 kernel_vaddr, bytes size);

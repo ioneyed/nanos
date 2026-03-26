@@ -584,8 +584,11 @@ closure_function(2, 0, void, unmap_and_free_phys_complete,
     heap h = heap_physical(get_kernel_heaps());
     buffer phys_ranges = bound(phys_ranges);
     range *r;
-    while ((r = buffer_pop(phys_ranges, sizeof(*r))))
+    while ((r = buffer_pop(phys_ranges, sizeof(*r)))) {
+        for (u64 p = r->start; p < r->start + range_span(*r); p += PAGESIZE)
+            phys_alias_unregister_user_page(p);
         deallocate(h, r->start, range_span(*r));
+    }
     if (bound(on_stack)) {
         /* clear the buffer so it can be reused if there are other iterations */
         buffer_clear(phys_ranges);

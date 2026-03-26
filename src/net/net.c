@@ -77,10 +77,12 @@ void *lwip_allocate(u64 size)
     void *p = allocate(lwip_heap, size);
     if (p == INVALID_ADDRESS || p == 0)
         return 0;
-    /* Sanity check: returned pointer should be non-zero and page-aligned
-       for large allocations, and within a reasonable kernel address range. */
     if (size >= PAGESIZE && ((u64)p & (PAGESIZE - 1)) != 0) {
         rprintf("lwip_allocate: MISALIGNED large alloc: size %ld, ptr %p\n", size, p);
+    }
+    if (!phys_alias_check_kernel((u64)p, size)) {
+        halt("lwip_allocate: physical page aliasing detected! "
+             "Kernel alloc at %p (size %ld) maps to a user mmap page.\n", p, size);
     }
     return p;
 }

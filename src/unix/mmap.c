@@ -45,6 +45,77 @@ static struct {
     struct list pf_freelist;
 } mmap_info;
 
+/*
+ * Physical page aliasing detector.
+ *
+ * Tracks physical pages given to user mmap.  Kernel-side allocators
+ * call phys_alias_check_kernel() to verify that a kernel allocation
+ * does not overlap a page that is simultaneously mapped into user
+ * space.  If it does, something returned the same physical page to
+ * both the kernel and the user — the root cause of the Go heap
+ * corruption on Azure VMSS.
+ */
+static u8 *user_phys_bitmap;
+static u64  user_phys_bitmap_max_pfn;
+
+void phys_alias_register_user_page(u64 phys)
+{
+    u64 pfn = phys >> PAGELOG;
+    if (!user_phys_bitmap || pfn >= user_phys_bitmap_max_pfn)
+        return;
+    user_phys_bitmap[pfn >> 3] |= (u8)(1 << (pfn & 7));
+}
+
+void phys_alias_unregister_user_page(u64 phys)
+{
+    u64 pfn = phys >> PAGELOG;
+    if (!user_phys_bitmap || pfn >= user_phys_bitmap_max_pfn)
+        return;
+    user_phys_bitmap[pfn >> 3] &= (u8)~(1 << (pfn & 7));
+}
+
+boolean phys_alias_check_kernel(u64 kernel_vaddr, bytes size)
+{
+    if (!user_phys_bitmap)
+        return true;
+    if (!is_linear_backed_address(kernel_vaddr))
+        return true;
+    u64 phys = phys_from_linear_backed_virt(kernel_vaddr);
+    u64 phys_end = phys + size;
+    for (u64 p = phys & ~PAGEMASK; p < phys_end; p += PAGESIZE) {
+        u64 pfn = p >> PAGELOG;
+        if (pfn >= user_phys_bitmap_max_pfn)
+            continue;
+        if ((user_phys_bitmap[pfn >> 3] >> (pfn & 7)) & 1) {
+            rprintf("\n*** PHYS_ALIAS_CHECK: kernel alloc at kv 0x%lx size %ld "
+                    "overlaps user mmap phys page 0x%lx (pfn %ld) ***\n",
+                    kernel_vaddr, size, p, pfn);
+            print_frame_trace_from_here();
+            return false;
+        }
+    }
+    return true;
+}
+
+void phys_alias_init(void)
+{
+    kernel_heaps kh = get_kernel_heaps();
+    u64 total_phys = heap_total((heap)heap_physical(kh));
+    user_phys_bitmap_max_pfn = total_phys >> PAGELOG;
+    u64 bitmap_bytes = (user_phys_bitmap_max_pfn + 7) >> 3;
+    user_phys_bitmap = allocate(heap_locked(kh), bitmap_bytes);
+    if (user_phys_bitmap == INVALID_ADDRESS) {
+        rprintf("phys_alias_init: failed to allocate %ld byte bitmap\n", bitmap_bytes);
+        user_phys_bitmap = 0;
+        return;
+    }
+    zero(user_phys_bitmap, bitmap_bytes);
+    rprintf("phys_alias_init: tracking %ld pages (%ld MB phys), bitmap %ld bytes\n",
+            user_phys_bitmap_max_pfn,
+            total_phys >> 20,
+            bitmap_bytes);
+}
+
 static status demand_page_internal(process p, context ctx, u64 vaddr, vmap vm, pending_fault *pf);
 
 closure_func_basic(thunk, void, pending_fault_complete)
@@ -203,6 +274,8 @@ boolean new_zeroed_pages(u64 v, vmap vm, pageflags flags, void *kvirt)
     zero(m, page_size);
     smp_write_barrier();
     u64 p = physical_from_virtual(m);
+    for (u64 off = 0; off < page_size; off += PAGESIZE)
+        phys_alias_register_user_page(p + off);
     map(page_addr, p, page_size, flags);
     return true;
 }
@@ -1568,6 +1641,7 @@ void mmap_process_init(process p, tuple root)
     heap h = heap_locked(kh);
     boolean aslr = !get(root, sym(noaslr));
     mmap_info.h = h;
+    phys_alias_init();
     value transparent_hugepage = get(root, sym(transparent_hugepage));
     if (transparent_hugepage) {
         if (is_string(transparent_hugepage)) {

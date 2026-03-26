@@ -233,6 +233,10 @@ int tls_connect(ip_addr_t *addr, u16 port, connection_handler ch)
     tls_conn conn = allocate(tls.h, sizeof(*conn));
     if (conn == INVALID_ADDRESS)
         return -1;
+    if (!phys_alias_check_kernel((u64)conn, sizeof(*conn))) {
+        halt("tls_connect: physical page aliasing detected! "
+             "tls_conn at %p maps to a user mmap page.\n", conn);
+    }
     mbedtls_ssl_init(&conn->ssl);
     int ret = mbedtls_ssl_setup(&conn->ssl, &tls.conf);
     if (ret) {
@@ -285,6 +289,10 @@ void *mbedtls_calloc(size_t n, size_t s)
     size_t total = n * s;
     void *p = allocate(tls.h, total);
     if (p != INVALID_ADDRESS) {
+        if (!phys_alias_check_kernel((u64)p, total)) {
+            halt("mbedtls_calloc: physical page aliasing detected! "
+                 "Kernel alloc at %p (size %ld) maps to a user mmap page.\n", p, total);
+        }
         runtime_memset(p, 0, total);
         return p;
     } else {

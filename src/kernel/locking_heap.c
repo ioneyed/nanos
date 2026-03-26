@@ -19,6 +19,11 @@ static u64 heaplock_alloc(heap h, bytes size)
     lock_heap(hl);
     u64 a = allocate_u64(hl->parent, size);
     unlock_heap(hl);
+    if (a != INVALID_PHYSICAL && a != 0 &&
+        !phys_alias_check_kernel(a, size)) {
+        halt("heaplock_alloc: physical page aliasing detected! "
+             "Kernel alloc at 0x%lx (size %ld) maps to a user mmap page.\n", a, size);
+    }
     return a;
 }
 
