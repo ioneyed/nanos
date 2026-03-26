@@ -203,29 +203,55 @@ void init_kernel_heaps(void)
         u64 phys_total = heap_total((heap)heaps.physical);
         u64 user_target = phys_total / 3;  /* reserve 1/3 for user pages */
         u64 chunk_size = PAGESIZE_2M;      /* allocate in 2MB chunks */
-        id_heap user_phys = create_id_heap(&bootstrap, &bootstrap,
-                                           0, phys_total, PAGESIZE, false);
-        if (user_phys != INVALID_ADDRESS) {
-            u64 user_got = 0;
-            u64 user_lo = (u64)-1, user_hi = 0;
-            while (user_got < user_target) {
-                u64 chunk = allocate_u64((heap)heaps.physical, chunk_size);
-                if (chunk == INVALID_PHYSICAL)
-                    break;
-                id_heap_add_range(user_phys, chunk, chunk_size);
-                user_got += chunk_size;
-                if (chunk < user_lo) user_lo = chunk;
-                if (chunk + chunk_size > user_hi) user_hi = chunk + chunk_size;
-            }
-            if (user_got > 0) {
+
+        /* Try one large contiguous allocation first */
+        u64 user_phys_size = user_target & ~(chunk_size - 1);
+        u64 user_phys_block = allocate_u64((heap)heaps.physical, user_phys_size);
+        if (user_phys_block != INVALID_PHYSICAL) {
+            /* Use page_backed (not bootstrap) for id_heap metadata — the
+               bitmap for millions of pages is too large for bootstrap. */
+            id_heap user_phys = create_id_heap((heap)heaps.page_backed,
+                                               (heap)heaps.page_backed,
+                                               user_phys_block, user_phys_size,
+                                               PAGESIZE, false);
+            if (user_phys != INVALID_ADDRESS) {
+                id_heap_set_area(user_phys, user_phys_block, user_phys_size,
+                                 true, false);
                 backed_heap user_lb = allocate_linear_backed_heap(
-                    &bootstrap, (heap)user_phys, kvmem.linear, true);
+                    (heap)heaps.page_backed, (heap)user_phys, kvmem.linear, true);
                 if (user_lb != INVALID_ADDRESS) {
                     user_page_heap = (heap)user_lb;
-                    rprintf("PHYS_SPLIT: user pool %ld MB (%ld chunks) phys [0x%lx, 0x%lx)\n",
-                            user_got >> 20, user_got / chunk_size, user_lo, user_hi);
+                    rprintf("PHYS_SPLIT: user pool %ld MB phys [0x%lx, 0x%lx)\n",
+                            user_phys_size >> 20, user_phys_block,
+                            user_phys_block + user_phys_size);
                     rprintf("PHYS_SPLIT: kernel pool %ld MB remaining\n",
-                            (phys_total - user_got) >> 20);
+                            (phys_total - user_phys_size) >> 20);
+                }
+            }
+        } else {
+            rprintf("PHYS_SPLIT: contiguous alloc of %ld MB failed, trying chunks\n",
+                    user_phys_size >> 20);
+            /* Fall back to chunked allocation */
+            id_heap user_phys = create_id_heap((heap)heaps.page_backed,
+                                               (heap)heaps.page_backed,
+                                               0, phys_total, PAGESIZE, false);
+            if (user_phys != INVALID_ADDRESS) {
+                u64 user_got = 0;
+                while (user_got < user_target) {
+                    u64 chunk = allocate_u64((heap)heaps.physical, chunk_size);
+                    if (chunk == INVALID_PHYSICAL)
+                        break;
+                    id_heap_add_range(user_phys, chunk, chunk_size);
+                    user_got += chunk_size;
+                }
+                if (user_got > 0) {
+                    backed_heap user_lb = allocate_linear_backed_heap(
+                        (heap)heaps.page_backed, (heap)user_phys, kvmem.linear, true);
+                    if (user_lb != INVALID_ADDRESS) {
+                        user_page_heap = (heap)user_lb;
+                        rprintf("PHYS_SPLIT: user pool %ld MB (%ld chunks)\n",
+                                user_got >> 20, user_got / chunk_size);
+                    }
                 }
             }
         }
