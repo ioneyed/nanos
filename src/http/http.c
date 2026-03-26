@@ -212,7 +212,9 @@ closure_function(1, 1, status, http_recv,
         return timm("result", "http_recv: connection closed before finished parsing (state %d)", state);
     }
     
-    for (bytes i = b->start; i < b->end; i++) {
+    bytes i;
+  next_msg:
+    for (i = b->start; i < b->end; i++) {
         char x = ((unsigned char *)b->contents)[i];
         switch (p->state) {
         case STATE_INIT:
@@ -288,6 +290,15 @@ closure_function(1, 1, status, http_recv,
     if (b) {
         cleanup_parser(p);
         reset_parser(p);
+        /* If unprocessed bytes remain in the buffer (pipelined HTTP
+         * responses in the same TCP segment), continue parsing from
+         * the next byte.  Without this, the second response's data is
+         * silently lost and the parser carries stale state into the
+         * next connection, causing heap-corrupting wild parses. */
+        if (++i < b->end) {
+            b->start = i;
+            goto next_msg;
+        }
     } else {
         deallocate_parser(p);
         closure_finish();

@@ -55,6 +55,7 @@ typedef struct az_diag {
         closure_struct(value_handler, vh);
         timestamp table_switch;
         boolean pending;
+        int expected_responses;
     } metrics;
 } *az_diag;
 
@@ -192,7 +193,9 @@ static boolean azure_metrics_table_post(az_diag diag, sstring resource, buffer c
     set(req, sym(Connection), alloca_wrap_sstring(keepalive ? ss("keep-alive") : ss("close")));
     status s = http_request(diag->h, diag->metrics.out, HTTP_REQUEST_METHOD_POST, req, body);
     boolean success = is_ok(s);
-    if (!success) {
+    if (success) {
+        diag->metrics.expected_responses++;
+    } else {
         msg_err("%s error %v", func_ss, s);
         timm_dealloc(s);
     }
@@ -401,6 +404,21 @@ closure_func_basic(connection_handler, input_buffer_handler, azure_metrics_conn_
     azdiag_debug("connection to metrics server %s", out ? ss("succeeded") : ss("failed"));
     if (out) {
         diag->metrics.out = out;
+        /* Reset the HTTP parser for this connection.  A stale parser
+         * from a previously interrupted response (e.g. connection closed
+         * after the first of two pipelined responses) would misinterpret
+         * new response data, corrupting the kernel heap. */
+        if (diag->metrics.resp_parser != INVALID_ADDRESS)
+            apply(diag->metrics.resp_parser, 0);
+        diag->metrics.resp_parser = allocate_http_parser(diag->h,
+                                                         (value_handler)&diag->metrics.vh);
+        if (diag->metrics.resp_parser == INVALID_ADDRESS) {
+            msg_err("%s: out of memory", func_ss);
+            apply(out, 0);
+            diag->metrics.pending = false;
+            return INVALID_ADDRESS;
+        }
+        diag->metrics.expected_responses = 0;
         if (azure_metrics_post(diag))
             ibh = (input_buffer_handler)&diag->metrics.ibh;
     }
@@ -434,6 +452,8 @@ closure_func_basic(value_handler, void, azure_metrics_value_handler,
                    value v)
 {
     az_diag diag = struct_from_closure(az_diag, metrics.vh);
+    if (!v)
+        return;
     value start_line = get(v, sym(start_line));
     azdiag_debug("metrics server status %v", start_line);
     u64 status_code = 0;
@@ -456,8 +476,13 @@ closure_func_basic(value_handler, void, azure_metrics_value_handler,
     }
     if (!status_code)
         msg_err("%s: unexpected response %v", func_ss, v);
-    apply(diag->metrics.out, 0);
-    diag->metrics.out = 0;  /* signal to input buffer handler that connection is closed */
+    /* Close the connection only after all pipelined responses have
+     * been received; closing early would leave the HTTP parser in an
+     * inconsistent state for the next connection. */
+    if (--diag->metrics.expected_responses <= 0) {
+        apply(diag->metrics.out, 0);
+        diag->metrics.out = 0;  /* signal to input buffer handler that connection is closed */
+    }
 }
 
 int azure_diag_init(tuple cfg)
