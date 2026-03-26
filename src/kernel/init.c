@@ -192,7 +192,45 @@ void init_kernel_heaps(void)
     pageheap_init_done(pointer_from_u64(virt_base),
                        is_lowmem ? PAGEHEAP_LOWMEM_PAGESIZE : PAGESIZE_2M);
     u64 memory_reserve = is_lowmem ? PAGEHEAP_LOWMEM_MEMORY_RESERVE : PAGEHEAP_MEMORY_RESERVE;
-    heaps.pages = reserve_heap_wrapper(&bootstrap, (heap)heaps.page_backed, memory_reserve);
+
+    /*
+     * Physical memory split diagnostic: isolate user (Go heap) pages from
+     * kernel pages.  If kernel buffer overflows spill into adjacent physical
+     * pages, separating the pools will stop the Go heap corruption.
+     */
+    heap user_page_heap = (heap)heaps.page_backed;  /* fallback: shared */
+    if (kernmem_equals_dmamem) {
+        u64 phys_total = heap_total((heap)heaps.physical);
+        u64 user_target = phys_total / 3;  /* reserve 1/3 for user pages */
+        u64 chunk_size = PAGESIZE_2M;      /* allocate in 2MB chunks */
+        id_heap user_phys = create_id_heap(&bootstrap, &bootstrap,
+                                           0, phys_total, PAGESIZE, false);
+        if (user_phys != INVALID_ADDRESS) {
+            u64 user_got = 0;
+            u64 user_lo = (u64)-1, user_hi = 0;
+            while (user_got < user_target) {
+                u64 chunk = allocate_u64((heap)heaps.physical, chunk_size);
+                if (chunk == INVALID_PHYSICAL)
+                    break;
+                id_heap_add_range(user_phys, chunk, chunk_size);
+                user_got += chunk_size;
+                if (chunk < user_lo) user_lo = chunk;
+                if (chunk + chunk_size > user_hi) user_hi = chunk + chunk_size;
+            }
+            if (user_got > 0) {
+                backed_heap user_lb = allocate_linear_backed_heap(
+                    &bootstrap, (heap)user_phys, kvmem.linear, true);
+                if (user_lb != INVALID_ADDRESS) {
+                    user_page_heap = (heap)user_lb;
+                    rprintf("PHYS_SPLIT: user pool %ld MB (%ld chunks) phys [0x%lx, 0x%lx)\n",
+                            user_got >> 20, user_got / chunk_size, user_lo, user_hi);
+                    rprintf("PHYS_SPLIT: kernel pool %ld MB remaining\n",
+                            (phys_total - user_got) >> 20);
+                }
+            }
+        }
+    }
+    heaps.pages = reserve_heap_wrapper(&bootstrap, user_page_heap, memory_reserve);
     int max_mcache_order = is_lowmem ? MAX_LOWMEM_MCACHE_ORDER : MAX_MCACHE_ORDER;
     bytes pagesize = is_lowmem ? U64_FROM_BIT(max_mcache_order + 1) : PAGESIZE_2M;
     heaps.general = allocate_mcache(&bootstrap, (heap)heaps.page_backed, 5, max_mcache_order,
