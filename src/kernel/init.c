@@ -208,49 +208,48 @@ void init_kernel_heaps(void)
         u64 user_phys_size = user_target & ~(chunk_size - 1);
         u64 user_phys_block = allocate_u64((heap)heaps.physical, user_phys_size);
         if (user_phys_block != INVALID_PHYSICAL) {
-            /* Use page_backed (not bootstrap) for id_heap metadata — the
-               bitmap for millions of pages is too large for bootstrap. */
+            /* create_id_heap makes the range all-free; no set_area needed.
+               Use page_backed (not bootstrap) for metadata — the bitmap
+               for millions of pages is too large for bootstrap. */
             id_heap user_phys = create_id_heap((heap)heaps.page_backed,
                                                (heap)heaps.page_backed,
                                                user_phys_block, user_phys_size,
                                                PAGESIZE, false);
             if (user_phys != INVALID_ADDRESS) {
-                id_heap_set_area(user_phys, user_phys_block, user_phys_size,
-                                 true, false);
                 backed_heap user_lb = allocate_linear_backed_heap(
                     (heap)heaps.page_backed, (heap)user_phys, kvmem.linear, true);
                 if (user_lb != INVALID_ADDRESS) {
                     user_page_heap = (heap)user_lb;
-                    rprintf("PHYS_SPLIT: user pool %ld MB phys [0x%lx, 0x%lx)\n",
-                            user_phys_size >> 20, user_phys_block,
-                            user_phys_block + user_phys_size);
-                    rprintf("PHYS_SPLIT: kernel pool %ld MB remaining\n",
-                            (phys_total - user_phys_size) >> 20);
+                    rprintf("PHYS_SPLIT: user pool active (contiguous)\n");
                 }
             }
         } else {
-            rprintf("PHYS_SPLIT: contiguous alloc of %ld MB failed, trying chunks\n",
-                    user_phys_size >> 20);
-            /* Fall back to chunked allocation */
-            id_heap user_phys = create_id_heap((heap)heaps.page_backed,
-                                               (heap)heaps.page_backed,
-                                               0, phys_total, PAGESIZE, false);
-            if (user_phys != INVALID_ADDRESS) {
-                u64 user_got = 0;
-                while (user_got < user_target) {
-                    u64 chunk = allocate_u64((heap)heaps.physical, chunk_size);
-                    if (chunk == INVALID_PHYSICAL)
-                        break;
-                    id_heap_add_range(user_phys, chunk, chunk_size);
-                    user_got += chunk_size;
-                }
-                if (user_got > 0) {
+            rprintf("PHYS_SPLIT: contiguous failed, trying chunks\n");
+            /* Seed id_heap with the first chunk, then add_range for the
+               rest.  create_id_heap(0, phys_total) would create a single
+               rangemap entry spanning ALL physical memory, causing every
+               subsequent add_range to conflict. */
+            u64 first_chunk = allocate_u64((heap)heaps.physical, chunk_size);
+            if (first_chunk != INVALID_PHYSICAL) {
+                id_heap user_phys = create_id_heap((heap)heaps.page_backed,
+                                                   (heap)heaps.page_backed,
+                                                   first_chunk, chunk_size,
+                                                   PAGESIZE, false);
+                if (user_phys != INVALID_ADDRESS) {
+                    u64 user_got = chunk_size;
+                    while (user_got < user_target) {
+                        u64 chunk = allocate_u64((heap)heaps.physical, chunk_size);
+                        if (chunk == INVALID_PHYSICAL)
+                            break;
+                        if (!id_heap_add_range(user_phys, chunk, chunk_size))
+                            break;
+                        user_got += chunk_size;
+                    }
                     backed_heap user_lb = allocate_linear_backed_heap(
                         (heap)heaps.page_backed, (heap)user_phys, kvmem.linear, true);
                     if (user_lb != INVALID_ADDRESS) {
                         user_page_heap = (heap)user_lb;
-                        rprintf("PHYS_SPLIT: user pool %ld MB (%ld chunks)\n",
-                                user_got >> 20, user_got / chunk_size);
+                        rprintf("PHYS_SPLIT: user pool active (chunked)\n");
                     }
                 }
             }
