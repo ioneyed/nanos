@@ -92,6 +92,69 @@ struct vmbus_msghc {
     struct hypercall_postmsg_in mh_inprm_save;
 };
 
+/* User pool canary pages: detect external corruption of user (Go heap)
+   physical memory.  These pages are allocated from heaps.pages (the user
+   pool when PHYS_SPLIT is active) and filled with a known pattern.  The
+   timer interrupt checks them periodically; any change means something
+   outside Go wrote to user pool physical memory. */
+#define USER_CANARY_MAX         64
+#define USER_CANARY_PATTERN     0xCAFEBABEDEADC0DEull
+#define USER_CANARY_INTERVAL    100     /* check every N timer ticks */
+
+static struct {
+    u64 virt;
+    u64 phys;
+} user_canaries[USER_CANARY_MAX];
+static int user_canary_count;
+static u64 user_canary_ticks;
+
+static void
+init_user_canaries(void)
+{
+    kernel_heaps kh = get_kernel_heaps();
+    heap pages = (heap)kh->pages;
+    if (!pages)
+        return;
+    for (int i = 0; i < USER_CANARY_MAX; i++) {
+        u64 virt = allocate_u64(pages, PAGESIZE);
+        if (virt == INVALID_PHYSICAL)
+            break;
+        u64 phys = physical_from_virtual(pointer_from_u64(virt));
+        u64 *p = (u64 *)pointer_from_u64(virt);
+        for (int j = 0; j < PAGESIZE / (int)sizeof(u64); j++)
+            p[j] = USER_CANARY_PATTERN;
+        user_canaries[i].virt = virt;
+        user_canaries[i].phys = phys;
+        user_canary_count = i + 1;
+    }
+    rprintf("user_canary: %d pages from user pool, pattern 0x%lx\n",
+            user_canary_count, USER_CANARY_PATTERN);
+    for (int i = 0; i < user_canary_count; i++)
+        rprintf("  canary[%02d] phys 0x%lx\n",
+                i, user_canaries[i].phys);
+}
+
+static void
+check_user_canaries(void)
+{
+    if (user_canary_count == 0)
+        return;
+    if (++user_canary_ticks % USER_CANARY_INTERVAL != 0)
+        return;
+    for (int i = 0; i < user_canary_count; i++) {
+        u64 *p = (u64 *)pointer_from_u64(user_canaries[i].virt);
+        for (int j = 0; j < PAGESIZE / (int)sizeof(u64); j++) {
+            if (p[j] != USER_CANARY_PATTERN) {
+                halt("USER CANARY CORRUPTION: canary[%d] offset %d "
+                     "phys 0x%lx expected 0x%lx got 0x%lx\n",
+                     i, (int)(j * sizeof(u64)),
+                     user_canaries[i].phys + j * sizeof(u64),
+                     USER_CANARY_PATTERN, p[j]);
+            }
+        }
+    }
+}
+
 BSS_RO_AFTER_INIT uint32_t vmbus_current_version;
 
 static __inline void
@@ -111,6 +174,8 @@ vmbus_handle_intr1(vmbus_dev sc, int cpu)
         msg->msg_type = HYPERV_MSGTYPE_NONE;
 
         vmbus_et_intr();
+        check_user_canaries();
+        hv_guard_check_all();
 
         /*
          * Make sure the write to msg_type (i.e. set to
@@ -586,6 +651,14 @@ vmbus_dma_alloc(struct vmbus_dev *dev)
     hv_guard_register((u8 *)dev->vmbus_mnf2 + PAGESIZE,
                       dev->vmbus_mnf2_dma.hv_paddr + PAGESIZE,
                       "vmbus_mnf2");
+
+    rprintf("vmbus_dma: SIMP phys 0x%lx, SIEFP phys 0x%lx, "
+            "evtflags phys 0x%lx, MNF1 phys 0x%lx, MNF2 phys 0x%lx\n",
+            dev->vmbus_pcpu[0].message_dma.hv_paddr,
+            dev->vmbus_pcpu[0].event_flags_dma.hv_paddr,
+            dev->vmbus_evtflags_dma.hv_paddr,
+            dev->vmbus_mnf1_dma.hv_paddr,
+            dev->vmbus_mnf2_dma.hv_paddr);
 }
 
 closure_function(1, 0, void, vmbus_interrupt, vmbus_dev, dev)
@@ -629,6 +702,7 @@ vmbus_attach(kernel_heaps kh, vmbus_dev *result)
     dev->poll_mode = true;
 
     hv_guard_init();
+    init_user_canaries();
     vmbus_dma_alloc(dev);
 
     vmbus_synic_setup(dev);

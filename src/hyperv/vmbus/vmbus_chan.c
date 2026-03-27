@@ -143,6 +143,10 @@ vmbus_chan_open(struct vmbus_channel *chan, int txbr_size, int rxbr_size,
     u64 guard_phys = chan->ch_bufring_dma.hv_paddr + ring_size;
     hv_guard_register((u8 *)chan->ch_bufring + ring_size, guard_phys,
                       "vmbus_ring");
+    rprintf("vmbus_ring: chan %d phys 0x%lx-0x%lx (tx %d + rx %d)\n",
+            chan->ch_id, chan->ch_bufring_dma.hv_paddr,
+            chan->ch_bufring_dma.hv_paddr + ring_size - 1,
+            txbr_size, rxbr_size);
 
     cbr.cbr = chan->ch_bufring;
     cbr.cbr_paddr = chan->ch_bufring_dma.hv_paddr;

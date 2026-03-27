@@ -231,16 +231,21 @@ void init_kernel_heaps(void)
                subsequent add_range to conflict. */
             u64 first_chunk = allocate_u64((heap)heaps.physical, chunk_size);
             if (first_chunk != INVALID_PHYSICAL) {
+                rprintf("PHYS_SPLIT: user chunk[0] phys 0x%lx-0x%lx\n",
+                        first_chunk, first_chunk + chunk_size - 1);
                 id_heap user_phys = create_id_heap((heap)heaps.page_backed,
                                                    (heap)heaps.page_backed,
                                                    first_chunk, chunk_size,
                                                    PAGESIZE, false);
                 if (user_phys != INVALID_ADDRESS) {
                     u64 user_got = chunk_size;
+                    int chunk_idx = 1;
                     while (user_got < user_target) {
                         u64 chunk = allocate_u64((heap)heaps.physical, chunk_size);
                         if (chunk == INVALID_PHYSICAL)
                             break;
+                        rprintf("PHYS_SPLIT: user chunk[%d] phys 0x%lx-0x%lx\n",
+                                chunk_idx++, chunk, chunk + chunk_size - 1);
                         if (!id_heap_add_range(user_phys, chunk, chunk_size))
                             break;
                         user_got += chunk_size;

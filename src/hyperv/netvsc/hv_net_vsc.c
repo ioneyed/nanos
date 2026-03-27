@@ -177,6 +177,9 @@ hv_nv_init_rx_buffer_with_net_vsp(struct hv_device *device)
     vmbus_chan_gpadl_connect(
         device->channel, rx_buf_paddr,
         net_dev->rx_buf_size, &net_dev->rx_buf_gpadl_handle);
+    rprintf("netvsc: rx_buf phys 0x%lx-0x%lx (%d bytes)\n",
+            rx_buf_paddr, rx_buf_paddr + net_dev->rx_buf_size - 1,
+            net_dev->rx_buf_size);
 
     /* sema_wait(&ext->channel_init_sema); KYS CHECK */
 
@@ -277,6 +280,9 @@ hv_nv_init_send_buffer_with_net_vsp(struct hv_device *device)
     vmbus_chan_gpadl_connect(device->channel,
         send_buf_paddr, net_dev->send_buf_size,
         &net_dev->send_buf_gpadl_handle);
+    rprintf("netvsc: send_buf phys 0x%lx-0x%lx (%d bytes)\n",
+            send_buf_paddr, send_buf_paddr + net_dev->send_buf_size - 1,
+            net_dev->send_buf_size);
 
     /* Notify the NetVsp of the gpadl handle */
 
