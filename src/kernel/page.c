@@ -581,13 +581,18 @@ void map_nolock(u64 v, physical p, u64 length, pageflags flags)
 closure_function(2, 0, void, unmap_and_free_phys_complete,
                  buffer, phys_ranges, boolean, on_stack)
 {
-    heap h = heap_physical(get_kernel_heaps());
+    kernel_heaps kh = get_kernel_heaps();
     buffer phys_ranges = bound(phys_ranges);
     range *r;
     while ((r = buffer_pop(phys_ranges, sizeof(*r)))) {
-        for (u64 p = r->start; p < r->start + range_span(*r); p += PAGESIZE)
+        for (u64 p = r->start; p < r->start + range_span(*r); p += PAGESIZE) {
             phys_alias_unregister_user_page(p);
-        deallocate(h, r->start, range_span(*r));
+            /* Free through heaps.pages so pages return to the correct
+               physical heap (user_phys when PHYS_SPLIT is active).
+               heap_physical() is the kernel pool; freeing there leaks
+               user pages out of the user pool on every munmap. */
+            deallocate_u64((heap)kh->pages, pagemem.pagevirt.start + p, PAGESIZE);
+        }
     }
     if (bound(on_stack)) {
         /* clear the buffer so it can be reused if there are other iterations */
