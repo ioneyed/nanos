@@ -203,6 +203,20 @@ void start_secondary_cores(kernel_heaps kh)
 
 #endif
 
+/*
+ * MAX_CPUS_LIMIT: compile-time cap on the number of processors started.
+ * The Nanos manifest "CPUs" field is not available this early in boot
+ * (filesystem not yet mounted), so we enforce via compile-time define.
+ * Override at build time: -DMAX_CPUS_LIMIT=N
+ *
+ * Set to 1 as a workaround for SMP memory corruption observed on
+ * Hyper-V with 2+ vCPUs. Remove or raise once the SMP root cause
+ * (likely TLB shootdown timing or kernel heap allocator races) is fixed.
+ */
+#ifndef MAX_CPUS_LIMIT
+#define MAX_CPUS_LIMIT 1
+#endif
+
 void count_cpus_present(void)
 {
     /* Read ACPI tables for MADT access */
@@ -211,6 +225,10 @@ void count_cpus_present(void)
 #ifdef SMP_ENABLE
     if (acpi_walk_madt(stack_closure_func(madt_handler, count_processors_handler))) {
         init_debug("ACPI reports %d processors", present_processors);
+        if (MAX_CPUS_LIMIT > 0 && present_processors > MAX_CPUS_LIMIT) {
+            init_debug("capping processors to %d (MAX_CPUS_LIMIT)", MAX_CPUS_LIMIT);
+            present_processors = MAX_CPUS_LIMIT;
+        }
         return;
     }
     msg_warn("ACPI MADT not found, default to 1 processor");
