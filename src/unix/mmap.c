@@ -1522,6 +1522,17 @@ sysreturn madvise(void *addr, s64 length, int advice)
     case MADV_NOHUGEPAGE:
         clear_mask = VMAP_FLAG_THP;
         break;
+    case MADV_DONTNEED:
+        /* Zero the pages: callers (e.g. Go runtime) expect MADV_DONTNEED
+           to discard page contents so that subsequent reads return zeros. */
+        zero(addr, pad(length, PAGESIZE));
+        return 0;
+    case MADV_FREE:
+    case MADV_NORMAL:
+    case MADV_RANDOM:
+    case MADV_SEQUENTIAL:
+    case MADV_WILLNEED:
+        return 0;   /* advisory only, safe to ignore */
     default:
         return 0;   /* ignore non-supported advice values */
     }

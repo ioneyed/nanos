@@ -111,21 +111,63 @@ static u64 user_canary_ticks;
 static void
 init_user_canaries(void)
 {
+    /* Log the user pool chunk map now that formatters are registered */
+    extern void log_phys_split_chunks(void);
+    log_phys_split_chunks();
+
     kernel_heaps kh = get_kernel_heaps();
     heap pages = (heap)kh->pages;
     if (!pages)
         return;
-    for (int i = 0; i < USER_CANARY_MAX; i++) {
-        u64 virt = allocate_u64(pages, PAGESIZE);
-        if (virt == INVALID_PHYSICAL)
-            break;
-        u64 phys = physical_from_virtual(pointer_from_u64(virt));
-        u64 *p = (u64 *)pointer_from_u64(virt);
-        for (int j = 0; j < PAGESIZE / (int)sizeof(u64); j++)
-            p[j] = USER_CANARY_PATTERN;
-        user_canaries[i].virt = virt;
-        user_canaries[i].phys = phys;
-        user_canary_count = i + 1;
+
+    /* Allocate a large block, keep every Nth page as a canary, free the
+       rest.  This scatters canaries across the physical address space
+       instead of clustering in the first chunk. */
+    int stride = 128;  /* keep 1 page per 512KB */
+    int total_alloc = stride * USER_CANARY_MAX;
+    u64 *tmp = (u64 *)pointer_from_u64(
+        allocate_u64((heap)kh->general, total_alloc * sizeof(u64)));
+    if (!tmp) {
+        /* Fallback: just allocate consecutive canary pages */
+        for (int i = 0; i < USER_CANARY_MAX; i++) {
+            u64 virt = allocate_u64(pages, PAGESIZE);
+            if (virt == INVALID_PHYSICAL)
+                break;
+            u64 phys = physical_from_virtual(pointer_from_u64(virt));
+            u64 *p = (u64 *)pointer_from_u64(virt);
+            for (int j = 0; j < PAGESIZE / (int)sizeof(u64); j++)
+                p[j] = USER_CANARY_PATTERN;
+            user_canaries[i].virt = virt;
+            user_canaries[i].phys = phys;
+            user_canary_count = i + 1;
+        }
+    } else {
+        int n = 0;
+        for (int i = 0; i < total_alloc && n < total_alloc; i++) {
+            u64 virt = allocate_u64(pages, PAGESIZE);
+            if (virt == INVALID_PHYSICAL)
+                break;
+            tmp[n++] = virt;
+        }
+        /* Keep every stride-th page as canary, free the rest */
+        int ci = 0;
+        for (int i = 0; i < n; i++) {
+            if (i % stride == 0 && ci < USER_CANARY_MAX) {
+                u64 virt = tmp[i];
+                u64 phys = physical_from_virtual(pointer_from_u64(virt));
+                u64 *p = (u64 *)pointer_from_u64(virt);
+                for (int j = 0; j < PAGESIZE / (int)sizeof(u64); j++)
+                    p[j] = USER_CANARY_PATTERN;
+                user_canaries[ci].virt = virt;
+                user_canaries[ci].phys = phys;
+                ci++;
+            } else {
+                deallocate_u64(pages, tmp[i], PAGESIZE);
+            }
+        }
+        user_canary_count = ci;
+        deallocate_u64((heap)kh->general,
+                       u64_from_pointer(tmp), total_alloc * sizeof(u64));
     }
     rprintf("user_canary: %d pages from user pool, pattern 0x%lx\n",
             user_canary_count, USER_CANARY_PATTERN);

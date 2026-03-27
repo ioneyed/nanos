@@ -119,6 +119,23 @@ void kaslr(void)
     return_offset(kern_offset - phys_offset);
 }
 
+#define PHYS_SPLIT_MAX_CHUNKS 1024
+#define PHYS_SPLIT_CHUNK_SIZE PAGESIZE_2M
+static u64 phys_split_chunks[PHYS_SPLIT_MAX_CHUNKS];
+static int phys_split_chunk_count;
+
+void log_phys_split_chunks(void)
+{
+    if (phys_split_chunk_count == 0)
+        return;
+    rprintf("PHYS_SPLIT: %d user chunks (%d MB each):\n",
+            phys_split_chunk_count, PHYS_SPLIT_CHUNK_SIZE >> 20);
+    for (int i = 0; i < phys_split_chunk_count; i++)
+        rprintf("  chunk[%d] phys 0x%lx-0x%lx\n",
+                i, phys_split_chunks[i],
+                phys_split_chunks[i] + PHYS_SPLIT_CHUNK_SIZE - 1);
+}
+
 void init_kernel_heaps(void)
 {
     BSS_RO_AFTER_INIT static struct heap bootstrap;
@@ -231,21 +248,20 @@ void init_kernel_heaps(void)
                subsequent add_range to conflict. */
             u64 first_chunk = allocate_u64((heap)heaps.physical, chunk_size);
             if (first_chunk != INVALID_PHYSICAL) {
-                rprintf("PHYS_SPLIT: user chunk[0] phys 0x%lx-0x%lx\n",
-                        first_chunk, first_chunk + chunk_size - 1);
                 id_heap user_phys = create_id_heap((heap)heaps.page_backed,
                                                    (heap)heaps.page_backed,
                                                    first_chunk, chunk_size,
                                                    PAGESIZE, false);
                 if (user_phys != INVALID_ADDRESS) {
+                    phys_split_chunks[0] = first_chunk;
+                    phys_split_chunk_count = 1;
                     u64 user_got = chunk_size;
-                    int chunk_idx = 1;
                     while (user_got < user_target) {
                         u64 chunk = allocate_u64((heap)heaps.physical, chunk_size);
                         if (chunk == INVALID_PHYSICAL)
                             break;
-                        rprintf("PHYS_SPLIT: user chunk[%d] phys 0x%lx-0x%lx\n",
-                                chunk_idx++, chunk, chunk + chunk_size - 1);
+                        if (phys_split_chunk_count < PHYS_SPLIT_MAX_CHUNKS)
+                            phys_split_chunks[phys_split_chunk_count++] = chunk;
                         if (!id_heap_add_range(user_phys, chunk, chunk_size))
                             break;
                         user_got += chunk_size;
