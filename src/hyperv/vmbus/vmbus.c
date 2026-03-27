@@ -52,11 +52,8 @@ hv_guard_init(void)
 void
 hv_guard_register(void *guard_addr, u64 phys_addr, const char *label)
 {
-    if (hv_guard_count >= HV_GUARD_MAX) {
-        rprintf("hv_guard: table full, cannot register %s\n", label);
+    if (hv_guard_count >= HV_GUARD_MAX)
         return;
-    }
-    /* Fill the guard page with a known pattern */
     u64 *p = (u64 *)guard_addr;
     for (int i = 0; i < PAGESIZE / sizeof(u64); i++)
         p[i] = HV_GUARD_PATTERN;
@@ -64,8 +61,6 @@ hv_guard_register(void *guard_addr, u64 phys_addr, const char *label)
     hv_guards[idx].addr = guard_addr;
     hv_guards[idx].phys = phys_addr;
     hv_guards[idx].label = label;
-    rprintf("hv_guard: registered [%d] %s virt %p phys 0x%lx\n",
-            idx, label, guard_addr, phys_addr);
 }
 
 void
