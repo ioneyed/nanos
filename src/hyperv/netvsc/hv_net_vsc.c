@@ -156,12 +156,18 @@ hv_nv_init_rx_buffer_with_net_vsp(struct hv_device *device)
         return (ENODEV);
     }
 
-    net_dev->rx_buf = allocate_zero(sc->contiguous, net_dev->rx_buf_size);
+    net_dev->rx_buf = allocate_zero(sc->contiguous, net_dev->rx_buf_size + PAGESIZE);
     assert(net_dev->rx_buf != INVALID_ADDRESS);
     assert((u64)net_dev->rx_buf == pad((u64)net_dev->rx_buf, PAGESIZE));
 
     bus_addr_t rx_buf_paddr = physical_from_virtual(net_dev->rx_buf);
     assert(rx_buf_paddr != INVALID_PHYSICAL);
+
+    /* Guard page after the 1MB RX buffer */
+    hv_guard_register((u8 *)net_dev->rx_buf + net_dev->rx_buf_size,
+                      rx_buf_paddr + net_dev->rx_buf_size,
+                      "netvsc_rx_buf");
+
     /*
      * Establish the GPADL handle for this buffer on this channel.
      * Note:  This call uses the vmbus connection rather than the
@@ -251,12 +257,18 @@ hv_nv_init_send_buffer_with_net_vsp(struct hv_device *device)
         return (ENODEV);
     }
 
-    net_dev->send_buf = allocate_zero(sc->contiguous, net_dev->send_buf_size);
+    net_dev->send_buf = allocate_zero(sc->contiguous, net_dev->send_buf_size + PAGESIZE);
     assert(net_dev->send_buf != INVALID_ADDRESS);
     assert((u64)net_dev->send_buf == pad((u64)net_dev->send_buf, PAGESIZE));
 
     bus_addr_t send_buf_paddr = physical_from_virtual(net_dev->send_buf);
     assert(send_buf_paddr != INVALID_PHYSICAL);
+
+    /* Guard page after the 64KB TX buffer */
+    hv_guard_register((u8 *)net_dev->send_buf + net_dev->send_buf_size,
+                      send_buf_paddr + net_dev->send_buf_size,
+                      "netvsc_tx_buf");
+
     /*
      * Establish the gpadl handle for this buffer on this channel.
      * Note:  This call uses the vmbus connection rather than the

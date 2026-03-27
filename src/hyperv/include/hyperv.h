@@ -96,6 +96,18 @@ int			hyperv_guid2str(const struct hyperv_guid *, char *,
  */
 extern uint32_t		vmbus_current_version;
 
+/*
+ * Guard page diagnostic: detect hypervisor writes past shared buffer boundaries.
+ * Each guard page sits physically adjacent to a GPADL or shared memory region.
+ * If the hypervisor DMA overflows, the guard page pattern will be corrupted.
+ */
+#define HV_GUARD_PATTERN    0xFEFEFEFEFEFEFEFEull
+#define HV_GUARD_MAX        32
+
+void hv_guard_init(void);
+void hv_guard_register(void *guard_addr, u64 phys_addr, const char *label);
+void hv_guard_check_all(void);
+
 #endif	/* _KERNEL */
 
 #endif  /* _HYPERV_H_ */

@@ -29,6 +29,7 @@
 #include <kernel.h>
 #include <hyperv_internal.h>
 #include <hyperv_busdma.h>
+#include <hyperv.h>
 #include <vmbus_xact.h>
 #include <net_system_structs.h>
 #include "hyperv_var.h"
@@ -128,14 +129,20 @@ vmbus_chan_open(struct vmbus_channel *chan, int txbr_size, int rxbr_size,
     struct vmbus_chan_br cbr;
 
     /*
-     * Allocate the TX+RX bufrings.
+     * Allocate the TX+RX bufrings with an adjacent guard page.
      */
+    int ring_size = txbr_size + rxbr_size;
     assert(chan->ch_bufring == NULL); //bufrings are allocated
-    chan->ch_bufring = allocate(chan->ch_vmbus->contiguous, txbr_size + rxbr_size);
+    chan->ch_bufring = allocate(chan->ch_vmbus->contiguous, ring_size + PAGESIZE);
     assert(chan->ch_bufring != INVALID_ADDRESS);
     assert((u64)chan->ch_bufring == pad((u64)chan->ch_bufring, PAGESIZE));
     chan->ch_bufring_dma.hv_paddr = physical_from_virtual(chan->ch_bufring);
     assert(chan->ch_bufring_dma.hv_paddr != INVALID_PHYSICAL);
+
+    /* Register guard page after the ring buffer */
+    u64 guard_phys = chan->ch_bufring_dma.hv_paddr + ring_size;
+    hv_guard_register((u8 *)chan->ch_bufring + ring_size, guard_phys,
+                      "vmbus_ring");
 
     cbr.cbr = chan->ch_bufring;
     cbr.cbr_paddr = chan->ch_bufring_dma.hv_paddr;

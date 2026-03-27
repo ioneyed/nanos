@@ -1,5 +1,6 @@
 #include <kernel.h>
 #include <hyperv_internal.h>
+#include <hyperv.h>
 #include <vmbus_xact.h>
 #include "hyperv_var.h"
 #include "vmbus.h"
@@ -34,6 +35,62 @@ vmbus_chanmsg_handlers[VMBUS_CHANMSG_TYPE_MAX] = {
 };
 
 #define VMBUS_GPADL_START       0xe1e10
+
+static struct {
+    void *addr;
+    u64   phys;
+    const char *label;
+} hv_guards[HV_GUARD_MAX];
+static int hv_guard_count;
+
+void
+hv_guard_init(void)
+{
+    hv_guard_count = 0;
+}
+
+void
+hv_guard_register(void *guard_addr, u64 phys_addr, const char *label)
+{
+    if (hv_guard_count >= HV_GUARD_MAX) {
+        rprintf("hv_guard: table full, cannot register %s\n", label);
+        return;
+    }
+    /* Fill the guard page with a known pattern */
+    u64 *p = (u64 *)guard_addr;
+    for (int i = 0; i < PAGESIZE / sizeof(u64); i++)
+        p[i] = HV_GUARD_PATTERN;
+    int idx = hv_guard_count++;
+    hv_guards[idx].addr = guard_addr;
+    hv_guards[idx].phys = phys_addr;
+    hv_guards[idx].label = label;
+    rprintf("hv_guard: registered [%d] %s virt %p phys 0x%lx\n",
+            idx, label, guard_addr, phys_addr);
+}
+
+void
+hv_guard_check_all(void)
+{
+    for (int g = 0; g < hv_guard_count; g++) {
+        u64 *p = (u64 *)hv_guards[g].addr;
+        for (int i = 0; i < PAGESIZE / sizeof(u64); i++) {
+            if (p[i] != HV_GUARD_PATTERN) {
+                rprintf("\n*** HV GUARD PAGE CORRUPTED ***\n"
+                        "  guard[%d] label=%s virt=%p phys=0x%lx\n"
+                        "  offset=%d expected=0x%lx found=0x%lx\n",
+                        g, hv_guards[g].label, hv_guards[g].addr,
+                        hv_guards[g].phys,
+                        (int)(i * sizeof(u64)), HV_GUARD_PATTERN, p[i]);
+                /* Dump first 64 bytes of corruption for analysis */
+                rprintf("  hex dump at corruption point:\n  ");
+                for (int j = i; j < i + 8 && j < PAGESIZE / (int)sizeof(u64); j++)
+                    rprintf(" %016lx", p[j]);
+                rprintf("\n");
+                halt("hv_guard: hypervisor buffer overflow detected\n");
+            }
+        }
+    }
+}
 
 struct vmbus_msghc {
     struct vmbus_xact       *mh_xact;
@@ -489,29 +546,51 @@ closure_function(1, 0, void, vmbus_msg_task_closure,
 static void
 vmbus_dma_alloc(struct vmbus_dev *dev)
 {
-    dev->vmbus_pcpu[0].message = mem_alloc(dev->contiguous, PAGESIZE,
+    /* Allocate each shared page with an adjacent guard page.
+     * The guard page is physically contiguous (from contiguous heap)
+     * and filled with a known pattern.  If the hypervisor writes past
+     * the shared page boundary, the guard pattern will be corrupted. */
+    dev->vmbus_pcpu[0].message = mem_alloc(dev->contiguous, PAGESIZE + PAGESIZE,
                                            MEM_ZERO | MEM_NOWAIT | MEM_NOFAIL);
     dev->vmbus_pcpu[0].message_dma.hv_paddr = physical_from_virtual(dev->vmbus_pcpu[0].message);
     assert(dev->vmbus_pcpu[0].message_dma.hv_paddr != INVALID_PHYSICAL);
+    hv_guard_register((u8 *)dev->vmbus_pcpu[0].message + PAGESIZE,
+                      dev->vmbus_pcpu[0].message_dma.hv_paddr + PAGESIZE,
+                      "vmbus_simp");
 
-    dev->vmbus_pcpu[0].event_flags = mem_alloc(dev->contiguous, PAGESIZE,
+    dev->vmbus_pcpu[0].event_flags = mem_alloc(dev->contiguous, PAGESIZE + PAGESIZE,
                                                MEM_ZERO | MEM_NOWAIT | MEM_NOFAIL);
     dev->vmbus_pcpu[0].event_flags_dma.hv_paddr = physical_from_virtual(dev->vmbus_pcpu[0].event_flags);
     assert(dev->vmbus_pcpu[0].event_flags_dma.hv_paddr != INVALID_PHYSICAL);
+    hv_guard_register((u8 *)dev->vmbus_pcpu[0].event_flags + PAGESIZE,
+                      dev->vmbus_pcpu[0].event_flags_dma.hv_paddr + PAGESIZE,
+                      "vmbus_siefp");
 
-    dev->vmbus_evtflags = mem_alloc(dev->contiguous, PAGESIZE, MEM_ZERO | MEM_NOWAIT | MEM_NOFAIL);
+    dev->vmbus_evtflags = mem_alloc(dev->contiguous, PAGESIZE + PAGESIZE,
+                                    MEM_ZERO | MEM_NOWAIT | MEM_NOFAIL);
     dev->vmbus_rx_evtflags = dev->vmbus_evtflags;
     dev->vmbus_tx_evtflags = dev->vmbus_evtflags + (PAGESIZE / 2);
     dev->vmbus_evtflags_dma.hv_paddr = physical_from_virtual(dev->vmbus_evtflags);
     assert(dev->vmbus_evtflags_dma.hv_paddr != INVALID_PHYSICAL);
+    hv_guard_register((u8 *)dev->vmbus_evtflags + PAGESIZE,
+                      dev->vmbus_evtflags_dma.hv_paddr + PAGESIZE,
+                      "vmbus_evtflags");
 
-    dev->vmbus_mnf1 = mem_alloc(dev->contiguous, PAGESIZE, MEM_ZERO | MEM_NOWAIT | MEM_NOFAIL);
+    dev->vmbus_mnf1 = mem_alloc(dev->contiguous, PAGESIZE + PAGESIZE,
+                                MEM_ZERO | MEM_NOWAIT | MEM_NOFAIL);
     dev->vmbus_mnf1_dma.hv_paddr = physical_from_virtual(dev->vmbus_mnf1);
     assert(dev->vmbus_mnf1_dma.hv_paddr != INVALID_PHYSICAL);
+    hv_guard_register((u8 *)dev->vmbus_mnf1 + PAGESIZE,
+                      dev->vmbus_mnf1_dma.hv_paddr + PAGESIZE,
+                      "vmbus_mnf1");
 
-    dev->vmbus_mnf2 = mem_alloc(dev->contiguous, PAGESIZE, MEM_ZERO | MEM_NOWAIT | MEM_NOFAIL);
+    dev->vmbus_mnf2 = mem_alloc(dev->contiguous, PAGESIZE + PAGESIZE,
+                                MEM_ZERO | MEM_NOWAIT | MEM_NOFAIL);
     dev->vmbus_mnf2_dma.hv_paddr = physical_from_virtual(dev->vmbus_mnf2);
     assert(dev->vmbus_mnf2_dma.hv_paddr != INVALID_PHYSICAL);
+    hv_guard_register((u8 *)dev->vmbus_mnf2 + PAGESIZE,
+                      dev->vmbus_mnf2_dma.hv_paddr + PAGESIZE,
+                      "vmbus_mnf2");
 }
 
 closure_function(1, 0, void, vmbus_interrupt, vmbus_dev, dev)
@@ -554,6 +633,7 @@ vmbus_attach(kernel_heaps kh, vmbus_dev *result)
 
     dev->poll_mode = true;
 
+    hv_guard_init();
     vmbus_dma_alloc(dev);
 
     vmbus_synic_setup(dev);

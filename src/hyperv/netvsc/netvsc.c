@@ -23,6 +23,9 @@
 #define NETVSC_RX_CANARY_SIZE   32
 #define NETVSC_RX_CANARY_PATTERN 0xBA
 
+#define HV_GUARD_CHECK_INTERVAL 256  /* check guard pages every N packets */
+static u32 netvsc_recv_count;
+
 #define DEVICE_NAME "en"
 
 /*
@@ -383,6 +386,10 @@ netvsc_recv(struct hv_device *device_ctx, netvsc_packet *packet)
 {
     hn_softc_t *hn = device_ctx->device;
     struct netif *n = &hn->ndev.n;
+
+    /* Periodically verify guard pages to detect hypervisor overflow */
+    if ((++netvsc_recv_count & (HV_GUARD_CHECK_INTERVAL - 1)) == 0)
+        hv_guard_check_all();
 
     /*
      * Bail out if packet contains more data than configured MTU.
