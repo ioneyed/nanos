@@ -221,9 +221,6 @@ void init_kernel_heaps(void)
                 if (user_lb != INVALID_ADDRESS) {
                     user_page_heap = (heap)user_lb;
                     rprintf("PHYS_SPLIT: user pool active (contiguous)\n");
-                    rprintf("PHYS_SPLIT: user phys 0x%lx - 0x%lx (%ld MB)\n",
-                            user_phys_block, user_phys_block + user_phys_size,
-                            user_phys_size >> 20);
                 }
             }
         } else {
@@ -240,9 +237,6 @@ void init_kernel_heaps(void)
                                                    PAGESIZE, false);
                 if (user_phys != INVALID_ADDRESS) {
                     u64 user_got = chunk_size;
-                    u64 user_phys_min = first_chunk;
-                    u64 user_phys_max = first_chunk + chunk_size;
-                    int user_chunk_count = 1;
                     while (user_got < user_target) {
                         u64 chunk = allocate_u64((heap)heaps.physical, chunk_size);
                         if (chunk == INVALID_PHYSICAL)
@@ -250,28 +244,17 @@ void init_kernel_heaps(void)
                         if (!id_heap_add_range(user_phys, chunk, chunk_size))
                             break;
                         user_got += chunk_size;
-                        if (chunk < user_phys_min)
-                            user_phys_min = chunk;
-                        if (chunk + chunk_size > user_phys_max)
-                            user_phys_max = chunk + chunk_size;
-                        user_chunk_count++;
                     }
                     backed_heap user_lb = allocate_linear_backed_heap(
                         (heap)heaps.page_backed, (heap)user_phys, kvmem.linear, true);
                     if (user_lb != INVALID_ADDRESS) {
                         user_page_heap = (heap)user_lb;
                         rprintf("PHYS_SPLIT: user pool active (chunked)\n");
-                        rprintf("PHYS_SPLIT: %d user chunks, %ld MB total, "
-                                "phys range 0x%lx - 0x%lx\n",
-                                user_chunk_count, user_got >> 20,
-                                user_phys_min, user_phys_max);
                     }
                 }
             }
         }
     }
-    rprintf("PHYS_SPLIT: kernel pool remaining %ld MB\n",
-            heap_total((heap)heaps.physical) >> 20);
     heaps.pages = reserve_heap_wrapper(&bootstrap, user_page_heap, memory_reserve);
     int max_mcache_order = is_lowmem ? MAX_LOWMEM_MCACHE_ORDER : MAX_MCACHE_ORDER;
     bytes pagesize = is_lowmem ? U64_FROM_BIT(max_mcache_order + 1) : PAGESIZE_2M;
