@@ -104,14 +104,24 @@ typedef struct netsock {
     closure_struct(fdesc_events, events);
     closure_struct(fdesc_ioctl, ioctl);
     closure_struct(fdesc_close, close);
+    u64 lock_flags;                   /* saved IRQ flags from netsock_lock */
 } *netsock;
 
 /* Mask of TCP flags expressing socket configuration settings (as opposed to flags describing the
  * current state of a socket). */
 #define SOCK_TCP_CFG_FLAGS   TF_NODELAY
 
-#define netsock_lock(s)     spin_lock(&(s)->sock.f.lock)
-#define netsock_unlock(s)   spin_unlock(&(s)->sock.f.lock)
+/*
+ * Socket lock must disable interrupts: the VMBus interrupt handler runs
+ * the entire netvsc -> lwIP -> tcp_input_lower chain in interrupt context
+ * (poll_mode).  Without interrupt disable, an interrupt can preempt a
+ * syscall mid-lwIP-call, corrupting shared TCP PCB state.
+ *
+ * Flags are stored in netsock->lock_flags so that unlock can be called
+ * from a different function than lock (e.g. netsock_notify_events).
+ */
+#define netsock_lock(s)     do { (s)->lock_flags = spin_lock_irq(&(s)->sock.f.lock); } while(0)
+#define netsock_unlock(s)   spin_unlock_irq(&(s)->sock.f.lock, (s)->lock_flags)
 
 #define DEFAULT_SO_RCVBUF   0x34000 /* same as Linux */
 
@@ -410,8 +420,10 @@ static struct tcp_pcb *netsock_tcp_get(netsock s)
     if (tcp_lw)
         tcp_ref(tcp_lw);
     netsock_unlock(s);
-    if (tcp_lw)
+    if (tcp_lw) {
+        disable_interrupts();
         tcp_lock(tcp_lw);
+    }
     return tcp_lw;
 }
 
@@ -419,6 +431,7 @@ static void netsock_tcp_put(struct tcp_pcb * tcp_lw)
 {
     tcp_unlock(tcp_lw);
     tcp_unref(tcp_lw);
+    enable_interrupts();
 }
 
 static void netsock_tcp_close(netsock s, struct tcp_pcb *tcp_lw)
@@ -611,9 +624,11 @@ static sysreturn sock_read_bh_internal(netsock s, struct msghdr *msg, int flags,
         netsock_unlock(s);
     if (tcp_lw) {
         if (rv > 0) {
+            disable_interrupts();
             tcp_lock(tcp_lw);
             tcp_recved(tcp_lw, rv);
             tcp_unlock(tcp_lw);
+            enable_interrupts();
         }
         tcp_unref(tcp_lw);
     }
@@ -724,6 +739,7 @@ closure_function(6, 1, sysreturn, socket_write_tcp_bh,
     struct tcp_pcb *tcp_lw = s->info.tcp.lw;
     tcp_ref(tcp_lw);
     netsock_unlock(s);
+    disable_interrupts();
     tcp_lock(tcp_lw);
 
     /* Note that the actual transmit window size is truncated to 16
@@ -741,6 +757,7 @@ closure_function(6, 1, sysreturn, socket_write_tcp_bh,
           full:
             tcp_unlock(tcp_lw);
             tcp_unref(tcp_lw);
+            enable_interrupts();
             if ((s->sock.f.flags & SOCK_NONBLOCK) || (flags & MSG_DONTWAIT) ||
                 (bqflags & BLOCKQ_ACTION_TIMEDOUT)) {
                 net_debug(" send buf full and non-blocking, return EAGAIN\n");
@@ -824,6 +841,7 @@ closure_function(6, 1, sysreturn, socket_write_tcp_bh,
     }
     tcp_unlock(tcp_lw);
     tcp_unref(tcp_lw);
+    enable_interrupts();
     goto out;
   out_unlock:
     netsock_unlock(s);
@@ -1211,6 +1229,10 @@ closure_func_basic(fdesc_close, sysreturn, socket_close,
         }
         break;
     case SOCK_DGRAM:
+        /* Clear recv callback before removal so any in-flight udp_input
+         * that already ref'd the PCB will see a NULL callback and skip
+         * invoking udp_input_lower on a socket being freed. */
+        udp_recv(s->info.udp.lw, NULL, NULL);
         udp_remove(s->info.udp.lw);
         break;
     }
@@ -1268,6 +1290,7 @@ static sysreturn netsock_shutdown(struct sock *sock, int how)
         struct tcp_pcb *tcp_lw = s->info.tcp.lw;
         tcp_ref(tcp_lw);
         netsock_unlock(s);
+        disable_interrupts();
         tcp_lock(tcp_lw);
 
         /* Determine whether TX or RX has been shut down during previous calls to this function. */
@@ -1283,6 +1306,7 @@ static sysreturn netsock_shutdown(struct sock *sock, int how)
             tcp_shutdown(tcp_lw, shut_rx, shut_tx);
         tcp_unlock(tcp_lw);
         tcp_unref(tcp_lw);
+        enable_interrupts();
         netsock_check_loop();
         break;
     case SOCK_DGRAM:
@@ -1318,6 +1342,11 @@ sysreturn shutdown(int sockfd, int how)
 static void udp_input_lower(void *z, struct udp_pcb *pcb, struct pbuf *p,
                             struct ip_globals *ip_data, u16 port)
 {
+    if (!z) {
+        if (p)
+            pbuf_free(p);
+        return;
+    }
     netsock s = z;
 #ifdef NETSYSCALL_DEBUG
     u8 *n = (u8 *)(&ip_data->current_iphdr_src);
@@ -1630,10 +1659,12 @@ closure_function(2, 1, sysreturn, connect_tcp_bh,
                 s->info.tcp.lw = 0;
                 s->info.tcp.state = TCP_SOCK_CREATED;
                 netsock_unlock(s);
+                disable_interrupts();
                 tcp_lock(tcp_lw);
                 tcp_shutdown(tcp_lw, 1, 1);
                 tcp_unlock(tcp_lw);
                 tcp_unref(tcp_lw);
+                enable_interrupts();
                 goto out;
             } else {
                 assert(s->info.tcp.state == TCP_SOCK_IN_CONNECTION);
@@ -1704,6 +1735,7 @@ static inline sysreturn connect_tcp(netsock s, const ip_addr_t* address,
         rv = -EINVAL;
         goto out;
     }
+    disable_interrupts();
     tcp_lock(lw);
     tcp_arg(lw, s);
     tcp_recv(lw, tcp_input_lower);
@@ -1713,6 +1745,7 @@ static inline sysreturn connect_tcp(netsock s, const ip_addr_t* address,
     set_lwip_error(s, ERR_OK);
     err_t err = tcp_connect(lw, address, port, connect_tcp_complete);
     tcp_unlock(lw);
+    enable_interrupts();
     if (err != ERR_OK)
         return lwip_to_errno(err);
     netsock_check_loop();
@@ -2255,12 +2288,14 @@ closure_function(5, 1, sysreturn, accept_bh,
 
     /* release slot in lwIP listen backlog */
     if (tcp_lw) {
+        disable_interrupts();
         tcp_lock(tcp_lw);
         tcp_backlog_accepted(tcp_lw);
         tcp_lw->flags = (tcp_lw->flags & ~SOCK_TCP_CFG_FLAGS) |
                         (child->info.tcp.flags & SOCK_TCP_CFG_FLAGS);
         tcp_unlock(tcp_lw);
         tcp_unref(tcp_lw);
+        enable_interrupts();
     }
 
     rv = allocate_fd(child->p, child);
@@ -2513,6 +2548,7 @@ static sysreturn netsock_setsockopt(struct sock *sock, int level,
             if (tcp_lw && (s->info.tcp.state != TCP_SOCK_LISTENING)) {
                 tcp_ref(tcp_lw);
                 netsock_unlock(s);
+                disable_interrupts();
                 tcp_lock(tcp_lw);
                 if (opt_val.val)
                     tcp_nagle_disable(tcp_lw);
@@ -2520,6 +2556,7 @@ static sysreturn netsock_setsockopt(struct sock *sock, int level,
                     tcp_nagle_enable(tcp_lw);
                 tcp_unlock(tcp_lw);
                 tcp_unref(tcp_lw);
+                enable_interrupts();
             } else {
                 if (opt_val.val)
                     s->info.tcp.flags |= TF_NODELAY;
@@ -2550,6 +2587,7 @@ static void netsock_get_tcpinfo(netsock s, struct tcp_info *info)
 {
     zero(info, sizeof(*info));
     struct tcp_pcb *lw = s->info.tcp.lw;
+    disable_interrupts();
     tcp_lock(lw);
     u8 *state = &info->tcpi_state;
     switch (lw->state) {
@@ -2561,6 +2599,7 @@ static void netsock_get_tcpinfo(netsock s, struct tcp_info *info)
         info->tcpi_unacked = ((struct tcp_pcb_listen *)lw)->accepts_pending;
         info->tcpi_sacked = ((struct tcp_pcb_listen *)lw)->backlog;
         tcp_unlock(lw);
+        enable_interrupts();
         return;
     case SYN_SENT:
         *state = TCP_SYN_SENT;
@@ -2633,6 +2672,7 @@ static void netsock_get_tcpinfo(netsock s, struct tcp_info *info)
     }
     info->tcpi_snd_wnd = lw->snd_wnd_max;
     tcp_unlock(lw);
+    enable_interrupts();
 }
 
 static sysreturn netsock_getsockopt(struct sock *sock, int level,

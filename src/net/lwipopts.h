@@ -46,7 +46,10 @@
 #else
 #define LWIP_PLATFORM_DIAG
 #endif /* LWIP_DEBUG */
-#define LWIP_PLATFORM_ASSERT(x)
+#define LWIP_PLATFORM_ASSERT(x) do { \
+    rprintf("lwip ASSERT FAIL: %s (%s:%d)\n", (x), __FILE__, __LINE__); \
+    halt("lwip assertion failed\n"); \
+} while(0)
 #define LWIP_NO_STDDEF_H 1
 #define LWIP_NO_STDINT_H 1
 #define LWIP_NO_INTTYPES_H 1
@@ -173,18 +176,21 @@ void lwip_memset(void *x, unsigned char v, unsigned long len);
 int lwip_memcmp(const void *x, const void *y, unsigned long len);
 int lwip_strncmp(const char *x, const char *y, unsigned long len);
 
+void lwip_memmove(void *dest, const void *src, unsigned long len);
+
 #define memcpy(__a, __b, __c) lwip_memcpy(__a, __b, __c)
 #define memcmp(__a, __b, __c) lwip_memcmp(__a, __b, __c)
 #define memset(__a, __b, __c) lwip_memset((void *)(__a), __b, __c)
-#define memmove(__a, __b, __c) lwip_memcpy(__a, __b, __c)
+#define memmove(__a, __b, __c) lwip_memmove(__a, __b, __c)
 #define strncmp(__a, __b, __c) lwip_strncmp(__a, __b, __c)
 #define strcmp(__a, __b) runtime_strcmp(__a, __b)
 #define atoi(__a) lwip_atoi(__a)
 
 static inline void *calloc(size_t n, size_t s)
 {
-    void *x =  lwip_allocate(n*s);
-    lwip_memset(x, 0, n*s);
+    void *x = lwip_allocate(n * s);
+    if (x)
+        lwip_memset(x, 0, n * s);
     return x;
 }
 

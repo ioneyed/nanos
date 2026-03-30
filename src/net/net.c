@@ -75,11 +75,15 @@ u32 sys_now(void)
 void *lwip_allocate(u64 size)
 {
     void *p = allocate(lwip_heap, size);
-    return ((p != INVALID_ADDRESS) ? p : 0);
+    if (p == INVALID_ADDRESS || p == 0)
+        return 0;
+    return p;
 }
 
 void lwip_deallocate(void *x)
 {
+    if (!x)
+        return;
     /* no size info; mcache won't care */
     deallocate(lwip_heap, x, -1ull);
 }
@@ -156,6 +160,23 @@ void lwip_memcpy(void *a, const void *b, unsigned long len)
     runtime_memcpy(a, b, len);
 }
 
+void lwip_memmove(void *dest, const void *src, unsigned long len)
+{
+    u8 *d = dest;
+    const u8 *s = src;
+    if (d == s || len == 0)
+        return;
+    if (d < s || d >= s + len) {
+        runtime_memcpy(d, s, len);
+    } else {
+        /* overlapping, copy backwards */
+        d += len;
+        s += len;
+        while (len--)
+            *--d = *--s;
+    }
+}
+
 void lwip_memset(void *x, unsigned char v, unsigned long len)
 {
     runtime_memset(x, v, len);
@@ -168,9 +189,13 @@ int lwip_memcmp(const void *x, const void *y, unsigned long len)
 
 int lwip_strncmp(const char *x, const char *y, unsigned long len)
 {
-    for (int i = 0; i < len; i++) {
-        if ((*x) != (*y)) return -1;
-        if ((!*x) || (!*y)) return -1;
+    for (unsigned long i = 0; i < len; i++) {
+        if (*x != *y)
+            return (*x < *y) ? -1 : 1;
+        if (!*x)
+            return 0;
+        x++;
+        y++;
     }
     return 0;
 }
